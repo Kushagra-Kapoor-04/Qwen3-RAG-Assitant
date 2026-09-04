@@ -1,217 +1,213 @@
-# 🤖 Qwen3 RAG Assistant
+# Qwen3 RAG Assistant
 
-[![CI](https://github.com/Kushagra-Kapoor-04/Qwen3-RAG-Assistant/actions/workflows/ci.yml/badge.svg)](https://github.com/Kushagra-Kapoor-04/Qwen3-RAG-Assistant/actions/workflows/ci.yml)
-![Python](https://img.shields.io/badge/python-3.10%2B-blue)
-![License](https://img.shields.io/badge/license-MIT-green)
-![FastAPI](https://img.shields.io/badge/API-FastAPI-009688)
-![Docker](https://img.shields.io/badge/container-Docker-2496ED)
+A Retrieval-Augmented Generation (RAG) assistant built on **Qwen3** (served locally via **Ollama**), with a FAISS vector store, a Streamlit UI, and a production-ready FastAPI service — packaged for one-command deployment with Docker.
 
-A production-style **Retrieval-Augmented Generation (RAG)** assistant that answers questions **only** from your own documents — powered by **Qwen3** (via Ollama) for generation and **FAISS** for vector search. It self-checks every answer for hallucinations and automatically regenerates a more grounded response when needed.
-
-Runs entirely **locally / offline** (no external API keys required) and ships as a **CLI, a Streamlit web app, and a REST API**, containerized with Docker.
+Originally built as a CLI/Streamlit prototype, this version adds a REST API, containerization, CI, and a set of grounding/config bug fixes found during review.
 
 ---
 
-## Why this project
+## Features
 
-Most "RAG demos" stop at retrieve → generate. This one adds the part that actually matters in production: **verification**.
-
-```
-Question ─▶ Retrieve ─▶ Generate ─▶ Evaluate (grounded?) ─▶ ✅ Return
-                                         │
-                                         └─ ✗ Not grounded ─▶ Regenerate (up to N tries) ─▶ Return conservative, cited answer
-```
-
-If the assistant can't verify its own answer against the retrieved context after several attempts, it **degrades gracefully** to an honest "I don't have enough information" response instead of confidently hallucinating.
-
----
-
-## ✨ Key Features
-
-- **🛡️ Strict Grounding** — a dedicated evaluation chain checks every answer's claims against the retrieved context and flags unsupported statements.
-- **🔄 Auto-Regeneration** — ungrounded answers are automatically rewritten (up to a configurable number of attempts) until they pass grounding, or the assistant honestly says it doesn't know.
-- **🔍 Context-Aware Retrieval** — FAISS (`IndexFlatIP`, cosine similarity) + `sentence-transformers` embeddings, with optional MMR-based diversity re-ranking to reduce redundant chunks.
-- **⚡ Real-Time Streaming** — token-by-token answers in both the Streamlit UI and the REST API (Server-Sent Events).
-- **🌐 Three Interfaces, One Core** — CLI, Streamlit UI, and a FastAPI REST API all sit on top of the same `QueryService`, so the RAG logic is tested once and reused everywhere.
-- **📊 Full Observability** — every query logs retrieval time, groundedness verdict, regeneration attempts, and sources used.
-- **🐳 One-Command Deploy** — `docker compose up` starts Ollama + the API + the UI together.
-- **✅ CI-Tested** — GitHub Actions runs the test suite (unit + API integration tests) and a Docker build on every push.
+- **Retrieval-Augmented Generation** — answers are grounded strictly in retrieved document context, not model memory
+- **Local LLM inference** — runs Qwen3 through Ollama, no external API calls or API keys required
+- **FAISS vector store** — fast local similarity search over embedded document chunks
+- **Hallucination / grounding evaluation** — a dedicated evaluation chain scores responses for faithfulness to source context, with automatic regeneration if a response is under-grounded
+- **Two interfaces**
+  - `app.py` — Streamlit UI for interactive chat
+  - `api/main.py` — FastAPI REST service for programmatic access
+- **Streaming responses** — Server-Sent Events (SSE) endpoint for token-by-token output
+- **Dockerized** — Ollama, the API, and the Streamlit UI run together via `docker-compose`
+- **CI** — GitHub Actions runs the full pytest suite on Python 3.10 and 3.11, plus a Docker build check, on every push
 
 ---
 
-## 🏗️ Architecture
-
-```mermaid
-flowchart TD
-    subgraph Ingestion["Offline: Ingestion Pipeline"]
-        A[Raw Documents\nPDF / TXT / DOCX / MD] --> B[Loader]
-        B --> C[Splitter\nchunking + overlap]
-        C --> D[Embedder\nsentence-transformers]
-        D --> E[(FAISS Index)]
-    end
-
-    subgraph Online["Online: Query Pipeline"]
-        Q[User Question] --> R[Retriever\ntop-k similarity search]
-        E -.-> R
-        R --> G[RAG Chain\nQwen3 via Ollama]
-        G --> EV{Evaluation Chain\nis it grounded?}
-        EV -- yes --> OUT[Return Answer\n+ sources + metadata]
-        EV -- no --> RG[Regeneration Chain\nrewrite with issues]
-        RG --> EV2{Re-evaluate}
-        EV2 -- grounded --> OUT
-        EV2 -- still not grounded\nmax attempts reached --> CONS[Conservative Fallback\nAnswer]
-        CONS --> OUT
-    end
-
-    Interfaces["CLI · Streamlit UI · FastAPI REST/SSE"] --> Q
-    OUT --> Interfaces
-```
-
-### Project structure
+## Architecture
 
 ```
-├── api/                  # FastAPI REST + streaming (SSE) API
-├── app.py                # CLI + Streamlit entry point
-├── chains/                # RAG, evaluation (hallucination check), regeneration
-├── config/                # Settings, prompts, constants
-├── ingestion/             # Document loading, chunking, embedding
-├── vectorstore/           # FAISS store + retriever (similarity / MMR)
-├── llm/                   # Ollama/Qwen3 client wrapper (sync + streaming)
-├── services/              # Query orchestration + structured logging
-├── scripts/               # ingest.py, evaluate.py, check_db.py
-├── tests/                 # pytest unit + API integration tests
-├── Dockerfile / docker-compose.yml
+                     ┌─────────────────┐
+                     │   Documents      │
+                     │  (data/raw/)     │
+                     └────────┬─────────┘
+                              │
+                     ┌────────▼─────────┐
+                     │  Ingestion        │
+                     │  loader → splitter│
+                     │  → embedder        │
+                     └────────┬─────────┘
+                              │
+                     ┌────────▼─────────┐
+                     │  FAISS Vector     │
+                     │  Store             │
+                     └────────┬─────────┘
+                              │
+        ┌─────────────────────┼─────────────────────┐
+        │                     │                     │
+┌───────▼────────┐   ┌────────▼────────┐   ┌────────▼────────┐
+│  Streamlit UI    │   │  FastAPI Service │   │  Evaluation /     │
+│  (app.py)        │   │  (api/main.py)   │   │  Regeneration      │
+└───────┬────────┘   └────────┬────────┘   │  chains             │
+        │                     │             └────────┬────────┘
+        └──────────┬──────────┘                       │
+                    │                                  │
+           ┌────────▼──────────┐                       │
+           │  Query Service      │◄──────────────────────┘
+           │  → RAG Chain         │
+           │  → Qwen3 (Ollama)    │
+           └──────────────────────┘
+```
+
+**Query flow:** a user query is embedded and used to retrieve the top-k relevant chunks from FAISS → the RAG chain builds a strictly-grounded prompt from those chunks → Qwen3 (via Ollama) generates a response → the evaluation chain checks the response for grounding, triggering the regeneration chain (with a conservative fallback) if the response strays from the retrieved context.
+
+---
+
+## Project structure
+
+```
+Qwen3-RAG-Assistant/
+├── api/                  # FastAPI service (main.py: /query, /query/stream, /health, /history)
+├── app.py                # Streamlit UI
+├── chains/                # RAG, evaluation, and regeneration chains
+├── config/                # Settings, constants, and prompt templates
+├── data/                  # raw / processed / metadata document storage
+├── ingestion/              # Document loading, splitting, embedding
+├── llm/                    # Qwen3 (Ollama) client and streaming callbacks
+├── scripts/                # ingest.py, evaluate.py, check_db.py — CLI utilities
+├── services/                # Logging and query orchestration services
+├── tests/                   # pytest suite (API, retrieval, prompts, grounding)
+├── utils/                   # Context, validation, and helper utilities
+├── vectorstore/              # FAISS store + retriever
+├── Dockerfile
+├── docker-compose.yml
+├── requirements.txt
 └── .github/workflows/ci.yml
 ```
 
 ---
 
-## 🚀 Quickstart
+## Getting started
 
-### Option A — Docker (recommended)
+### Prerequisites
 
-```bash
-git clone https://github.com/Kushagra-Kapoor-04/Qwen3-RAG-Assistant.git
-cd Qwen3-RAG-Assistant
-docker compose up --build
-```
+- Python 3.10 or 3.11
+- [Ollama](https://ollama.com) installed locally, with the Qwen3 model pulled:
+  ```bash
+  ollama pull qwen3
+  ```
+- (Optional) Docker + Docker Compose, if you'd rather run everything in containers
 
-This starts:
-| Service | URL |
-|---|---|
-| Ollama (model server) | `http://localhost:11434` |
-| REST API + docs | `http://localhost:8000/docs` |
-| Streamlit UI | `http://localhost:8501` |
-
-Then pull the model once and ingest your docs (see below).
-
-### Option B — Local
+### Local setup
 
 ```bash
 git clone https://github.com/Kushagra-Kapoor-04/Qwen3-RAG-Assistant.git
 cd Qwen3-RAG-Assistant
+
+python -m venv venv
+source venv/bin/activate      # Windows: venv\Scripts\activate
+
 pip install -r requirements.txt
-
-# Ollama must be installed & running: https://ollama.ai
-ollama pull qwen3
+cp .env.example .env          # adjust settings as needed
 ```
 
-Create a `.env` (see `.env.example`) to override defaults such as `CHUNK_SIZE`, `TOP_K_RESULTS`, or `OLLAMA_MODEL`.
-
-### 1. Ingest your documents
+Ingest your documents (place source files in `data/raw/` first):
 
 ```bash
-# Drop PDFs / .txt / .docx / .md into data/raw/, then:
-python scripts/ingest.py --source ./data/raw
+python scripts/ingest.py
 ```
 
-### 2. Run it
+Run the Streamlit UI:
 
 ```bash
-# CLI
-python app.py
-
-# Streamlit UI
-python -m streamlit run app.py
-
-# REST API
-uvicorn api.main:app --reload --port 8000
+streamlit run app.py
 ```
+
+Or run the API:
+
+```bash
+uvicorn api.main:app --reload
+```
+
+### Docker setup
+
+```bash
+docker-compose up --build
+```
+
+This starts Ollama, the FastAPI service, and the Streamlit UI together. See `docker-compose.yml` for exposed ports and volume mounts.
 
 ---
 
-## 🔌 REST API
+## API reference
 
-Interactive docs are auto-generated at `/docs` (Swagger) and `/redoc`.
+Base URL (local): `http://localhost:8000`
 
-**Ask a question:**
+| Endpoint          | Method | Description                                      |
+|--------------------|--------|---------------------------------------------------|
+| `/health`           | GET    | Health check                                       |
+| `/query`            | POST   | Submit a query, get a full grounded response        |
+| `/query/stream`     | POST   | Same as above, streamed via Server-Sent Events (SSE) |
+| `/history`          | GET    | Retrieve recent query history                        |
+
+**Example — `/query`:**
+
 ```bash
 curl -X POST http://localhost:8000/query \
   -H "Content-Type: application/json" \
-  -d '{"question": "What does the document say about pricing?", "top_k": 5}'
+  -d '{"question": "What does the document say about deployment?"}'
 ```
 
 ```json
 {
-  "question": "What does the document say about pricing?",
   "answer": "...",
-  "sources": ["pricing_sheet.pdf"],
-  "is_grounded": true,
-  "was_regenerated": false,
-  "regeneration_attempts": 0,
-  "processing_time_ms": 842.1
+  "sources": ["..."],
+  "grounded": true
 }
 ```
 
-**Stream a response (SSE):**
+**Example — `/query/stream`:**
+
 ```bash
 curl -N -X POST http://localhost:8000/query/stream \
   -H "Content-Type: application/json" \
-  -d '{"question": "Summarize the key findings."}'
+  -d '{"question": "Summarize the ingestion pipeline."}'
 ```
 
-**Other endpoints:** `GET /health`, `GET /history`, `DELETE /history`.
+Streams tokens as they're generated via SSE.
 
 ---
 
-## ⚙️ Configuration
+## Configuration
 
-All settings can be overridden via `.env` or environment variables (see `.env.example`):
+Key settings live in `config/settings.py` and `.env` (see `.env.example` for the full list):
 
-| Variable | Default | Description |
-|---|---|---|
-| `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server address |
-| `OLLAMA_MODEL` | `qwen3:latest` | Generation model |
-| `EMBEDDING_MODEL` | `all-MiniLM-L6-v2` | Sentence-transformers embedding model |
-| `CHUNK_SIZE` / `CHUNK_OVERLAP` | `500` / `50` | Document chunking |
-| `TOP_K_RESULTS` | `5` | Chunks retrieved per query |
-| `SIMILARITY_THRESHOLD` | `0.0` | Minimum cosine similarity to keep a chunk |
-| `HALLUCINATION_THRESHOLD` | `0.5` | Confidence threshold for grounding failures |
-| `MAX_REGENERATION_ATTEMPTS` | `3` | Max rewrite attempts before conservative fallback |
+| Variable            | Default | Description                                  |
+|----------------------|---------|------------------------------------------------|
+| `CHUNK_SIZE`          | `500`   | Document chunk size for splitting                |
+| `CHUNK_OVERLAP`       | `50`    | Overlap between chunks                            |
+| `OLLAMA_MODEL`        | `qwen3` | Model name served by Ollama                       |
+| `OLLAMA_BASE_URL`     | —       | Ollama server URL                                  |
+| `VECTORSTORE_PATH`    | —       | Local path for the FAISS index                       |
+| `MAX_REGEN_ATTEMPTS`  | —       | Max regeneration attempts before conservative fallback |
 
 ---
 
-## 🧪 Testing
+## Testing
 
 ```bash
-pytest tests/ -v
+pytest
 ```
 
-Covers the evaluation/regeneration grounding logic, prompt templates, retrieval, and the REST API (via `fastapi.testclient`, fully mocked — no live Ollama/FAISS needed in CI).
-
-CI runs this matrix (Python 3.10 & 3.11) plus a Docker build check on every push — see `.github/workflows/ci.yml`.
+The suite covers the API (mocked, no live Ollama/FAISS required), retrieval, prompt construction, and grounding/evaluation behavior. CI runs this automatically on Python 3.10 and 3.11 for every push, plus a Docker build check.
 
 ---
 
-## 🗺️ Roadmap
+## Bug fixes in this release
 
-- [ ] Hybrid retrieval (BM25 + dense) and cross-encoder re-ranking
-- [ ] Per-claim citation highlighting in the UI
-- [ ] Multi-turn conversational memory with context-aware follow-ups
-- [ ] Swap FAISS for a persistent vector DB (Qdrant/pgvector) for multi-user deployments
+- Fixed a broken f-string in the regeneration fallback path (`chains/regeneration_chain.py`) that crashed the assistant whenever it hit max regeneration attempts
+- Aligned `chunk_size`/`chunk_overlap` defaults in `config/settings.py` with `config/constants.py` (previously inconsistent)
+- Corrected the RAG prompt wording to explicitly enforce strict grounding
 
 ---
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+See [LICENSE](./LICENSE).
